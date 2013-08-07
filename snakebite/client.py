@@ -530,20 +530,20 @@ class Client(object):
     def _handle_touchz(self, path, node, replication, blocksize):
         # Item already exists
         if node:
+            overwrite = True
             if node.length != 0:
                 raise FileException("touchz: `%s': Not a zero-length file" % path)
             if self._is_dir(node):
                 raise DirectoryException("touchz: `%s': Is a directory" % path)
-
-            response = self._create_file(path, replication, blocksize, overwrite=True)
         else:
             # Check if the parent directory exists
+            overwrite = False
             parent = self._get_file_info(os.path.dirname(path))
             if not parent:
                 raise DirectoryException("touchz: `%s': No such file or directory" % path)
-            else:
-                response = self._create_file(path, replication, blocksize, overwrite=False)
-        return {"path": path, "result": response.result}
+        response = self._create_file(path, replication, blocksize, overwrite)
+
+        return {"path": path, "response": response}
 
     def setrep(self, paths, replication, recurse=False):
         ''' Set the replication factor for paths
@@ -675,6 +675,56 @@ class Client(object):
                     os.remove(temporary_target)
 
         return {"path": target, "result": result, "error": error, "source_path": path}
+
+    def copyFromLocal(self, paths, dst, check_crc=False):
+        ''' Copy files that match the file source pattern
+        to the local name.  Source is kept.  When copying multiple,
+        files, the destination must be a directory.
+
+        :param paths: Paths to copy
+        :type paths: list of strings
+        :param dst: Destination path
+        :type dst: string
+        :param check_crc: Check for checksum errors
+        :type check_crc: boolean
+        :returns: a generator that yields strings
+        '''
+        if not isinstance(paths, list):
+            raise InvalidInputException("Paths should be a list")
+        if not paths:
+            raise InvalidInputException("copyFromLocal: no path given")
+        if not dst:
+            raise InvalidInputException("copyFromLocal: no destination given")
+
+        for item in self.touchz([dst]):
+            #TODO: use item later. for now just write whatever
+
+            sources = paths
+            path = dst
+            self.base_source = None
+            processor = lambda path, node, sources=sources, check_crc=check_crc: self._handle_copyFromLocal(path, node, sources, check_crc)
+            for item in self._find_items([dst], processor, include_toplevel=True, recurse=True, include_children=True):
+                if item:
+                    yield item
+
+    def _handle_copyFromLocal(self, path, node, sources, check_crc):
+        # Calculate base directory using the first node only
+        '''
+        if self.base_source is None:
+            self.dst = os.path.abspath(dst)
+            if os.path.isdir(dst):  # If input destination is an existing directory, include toplevel
+                self.base_source = os.path.dirname(path)
+            else:
+                self.base_source = path
+
+            if self.base_source.endswith("/"):
+                self.base_source = self.base_source[:-1]
+
+        target = dst + (path.replace(self.base_source, "", 1))
+        '''
+
+        result = self._write_file(path, node)
+        return {"result": result, "path": path}
 
     def getmerge(self, path, dst, newline=False, check_crc=False):
         ''' Get all the files in the directories that
@@ -956,12 +1006,49 @@ class Client(object):
         # The response doesn't contain anything
         self.service.create(request)
 
-        # Issue a CompleteRequestProto
-        request = client_proto.CompleteRequestProto()
+        request = client_proto.AddBlockRequestProto()
         request.src = path
         request.clientName = "snakebite"
+        response = self.service.addBlock(request)
 
-        return self.service.complete(request)
+
+    def _write_file(self, path, node):
+        # Writing hack
+        # TODO: read source file, protect from failure, etc.
+
+        # Get Block Locations for file
+        length = node.length
+        request = client_proto.GetBlockLocationsRequestProto()
+        request.src = path
+        request.length = length
+        request.offset = 0L
+        response = self.service.getBlockLocations(request)
+
+        for block in response.locations.blocks: # NOTE: for now this is just a single block
+            length = block.b.numBytes
+            pool_id = block.b.poolId
+            packet_offset = 0
+
+            # Connect to datanode
+            for location in block.locs:
+                host = location.id.ipAddr
+                port = int(location.id.xferPort)
+                data_xciever = DataXceiverChannel(host, port)
+                if data_xciever.connect():
+                    data_xciever.writeBlock(length, pool_id, block.b.blockId, block.b.generationStamp, packet_offset)
+
+                    # Issue a CompleteRequest
+                    # Problem: before you can close, all the file's blocks need to be replicated
+                    request = client_proto.CompleteRequestProto()
+                    request.src = path
+                    request.clientName = "snakebite"
+
+                    #while response.result == False:
+                    response = self.service.complete(request)
+
+        if response.result == False: # Remove unfinished file for now
+            self.delete([path]).next()
+        return response.result
 
     def _read_file(self, path, node, tail_only, check_crc):
         length = node.length

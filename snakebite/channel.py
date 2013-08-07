@@ -477,6 +477,146 @@ class DataXceiverChannel(object):
         self.write(encoder._VarintBytes(len(data)))
         self.write(data)
 
+    def _write_bytes(self, n):
+        self.sock.send(n)
+
+    def writeBlock(self, length, pool_id, block_id, generation_stamp, offset):
+        #TODO: Write description, check for failure, etc.
+        '''
+
+        Send write request:
+        +---------------------------------------------------------------------+
+        |  Data Transfer Protocol Version, 2 bytes                            |
+        +---------------------------------------------------------------------+
+        |  Op code, 1 byte (READ_BLOCK = 81)                                  |
+        +---------------------------------------------------------------------+
+        |  Delimited serialized OpWriteBlockProto (varint len + request)       |
+        +---------------------------------------------------------------------+
+
+        Receive response:
+        +---------------------------------------------------------------------+
+        |  Delimited BlockOpResponseProto (varint len + response)             |
+        +---------------------------------------------------------------------+
+
+        Start writing packets. Each packet has the following structure:
+        +---------------------------------------------------------------------+
+        |  Packet length (4 bytes/32 bit int)                                 |
+        +---------------------------------------------------------------------+
+        |  Serialized size of header, 2 bytes                                 |
+        +---------------------------------------------------------------------+
+        |  Packet Header Proto                                                |
+        +---------------------------------------------------------------------+
+        |  x checksums, 4 bytes each                                          |
+        +---------------------------------------------------------------------+
+        |  x chunks of payload data                                           |
+        +---------------------------------------------------------------------+
+
+        '''
+
+        log.debug("%s sending writeBlock request" % self)
+
+        # Send version and opcode
+        self.sock.send(struct.pack('>h', 28))
+        self.sock.send(struct.pack('b', self.WRITE_BLOCK))
+        length = length - offset
+
+        # Create and send OpWriteBlockProto message
+        request = datatransfer_proto.OpWriteBlockProto()
+
+        #request.source = #optional
+        request.stage = 6  # 6 = pipeling set up for block creation
+        request.pipelineSize = 1  #?
+        request.minBytesRcvd = 0 #?
+        request.maxBytesRcvd = 10 #?
+        request.requestedChecksum.type = 2
+        request.requestedChecksum.bytesPerChecksum = 512
+        request.latestGenerationStamp = generation_stamp
+
+        header = request.header
+        header.clientName = "snakebite"
+        base_header = header.baseHeader
+        block = base_header.block
+        block.poolId = pool_id
+        block.blockId = block_id
+        block.generationStamp = generation_stamp
+
+        s_request = request.SerializeToString()
+        log_protobuf_message("OpWriteBlockProto:", request)
+        delimited_request = encoder._VarintBytes(len(s_request)) + s_request
+        self.sock.send(delimited_request)
+
+        # Receive BlockOp Response
+        byte_stream = RpcBufferedReader(self.sock)
+        block_op_response_bytes = get_delimited_message_bytes(byte_stream)
+        block_op_response = datatransfer_proto.BlockOpResponseProto()
+        block_op_response.ParseFromString(block_op_response_bytes)
+        log_protobuf_message("BlockOpResponseProto", block_op_response)
+
+
+        # Stream actual data with Packet Header, etc.
+        # TODO: worry about multiple packets and blocks later.
+        data = "aaaaa"
+
+        chunk_checksum = crc(data)
+        checksum = struct.pack('!I', chunk_checksum)
+
+        packet_header = datatransfer_proto.PacketHeaderProto()
+        packet_header.offsetInBlock = 0
+        packet_header.seqno = 0
+        packet_header.lastPacketInBlock = True
+        packet_header.dataLen = len(data) + len(checksum)
+
+        s_packet_header = packet_header.SerializeToString()
+        header_length = len(s_packet_header)
+
+        # length of packet_length (for historical reasons) + length of checksums + length of data
+        full_packet_length = 4 + len(checksum) + len(data)
+
+        self.sock.send(struct.pack('!I', full_packet_length))  # 4
+        self.sock.send(struct.pack('!H', header_length))  # 2
+        packet = s_packet_header + data
+        self.sock.send(packet)
+
+        # Send another OpWriteBlock message to close pipeline?
+
+        # Send version and opcode
+        self.sock.send(struct.pack('>h', 28))
+        self.sock.send(struct.pack('b', self.WRITE_BLOCK))
+        length = length - offset
+
+        # Create and send OpWriteBlockProto message
+        request = datatransfer_proto.OpWriteBlockProto()
+
+        #request.source = #optional
+        request.stage = 4  # CLOSE PIPELINE
+        request.pipelineSize = 1
+        request.minBytesRcvd = 0
+        request.maxBytesRcvd = 10
+        request.requestedChecksum.type = 2
+        request.requestedChecksum.bytesPerChecksum = 512
+        request.latestGenerationStamp = generation_stamp
+
+        header = request.header
+        header.clientName = "snakebite"
+        base_header = header.baseHeader
+        block = base_header.block
+        block.poolId = pool_id
+        block.blockId = block_id
+        block.generationStamp = generation_stamp
+
+        s_request = request.SerializeToString()
+        log_protobuf_message("OpWriteBlockProto:", request)
+        delimited_request = encoder._VarintBytes(len(s_request)) + s_request
+        self.sock.send(delimited_request)
+
+        # Read BlockOp response
+        byte_stream = RpcBufferedReader(self.sock)
+        block_op_response_bytes = get_delimited_message_bytes(byte_stream)
+        block_op_response = datatransfer_proto.BlockOpResponseProto()
+        block_op_response.ParseFromString(block_op_response_bytes)
+
+        return
+
     def readBlock(self, length, pool_id, block_id, generation_stamp, offset, check_crc):
         '''Send a read request to given block. If we receive a successful response,
         we start reading packets.
