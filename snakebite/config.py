@@ -44,7 +44,7 @@ class HDFSConfig(object):
         for property in cls.read_hadoop_config(core_site_path):
             if property.findall('name')[0].text == 'fs.defaultFS':
                 parse_result = urlparse(property.findall('value')[0].text)
-                log.debug("Got namenode: {host: %s, port: %d} from %s" % (parse_result.hostname, parse_result.port, core_conf_path))
+                log.debug("Got namenode: {host: %s, port: %d} from %s" % (parse_result.hostname, parse_result.port, core_site_path))
                 return [{"namenode": parse_result.hostname,
                          "port": parse_result.port}]
         return []
