@@ -539,7 +539,7 @@ class Client(object):
         ''' Stat a fileCount
 
         :param paths: Path
-        :type paths: string
+        :type paths: list
         :returns: a dictionary
 
         **Example:**
