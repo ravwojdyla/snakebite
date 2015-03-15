@@ -24,8 +24,7 @@ class ClientTest(unittest2.TestCase):
         e.errno = errno.ECONNREFUSED
         mocked_client_cat = Mock(side_effect=e)
         ha_client = HAClient([Namenode("foo"), Namenode("bar")])
-        ha_client.cat = HAClient._ha_gen_method(mocked_client_cat)
-        cat_result_gen = ha_client.cat(ha_client, ['foobar'])
+        cat_result_gen = ha_client.cat(['foobar'])
         self.assertRaises(OutOfNNException, all, cat_result_gen)
 
     def test_ha_client_ehostunreach_socket_error(self):
@@ -33,31 +32,22 @@ class ClientTest(unittest2.TestCase):
         e.errno = errno.EHOSTUNREACH
         mocked_client_cat = Mock(side_effect=e)
         ha_client = HAClient([Namenode("foo"), Namenode("bar")])
-        ha_client.cat = HAClient._ha_gen_method(mocked_client_cat)
-        cat_result_gen = ha_client.cat(ha_client, ['foobar'])
+        cat_result_gen = ha_client.cat(['foobar'])
         self.assertRaises(OutOfNNException, all, cat_result_gen)
 
     def test_ha_client_socket_timeout(self):
         e = socket.timeout
         mocked_client_cat = Mock(side_effect=e)
         ha_client = HAClient([Namenode("foo"), Namenode("bar")])
-        ha_client.cat = HAClient._ha_gen_method(mocked_client_cat)
-        cat_result_gen = ha_client.cat(ha_client, ['foobar'])
+        cat_result_gen = ha_client.cat(['foobar'])
         self.assertRaises(OutOfNNException, all, cat_result_gen)
 
     def test_ha_client_standby_errror(self):
         e = RequestError("org.apache.hadoop.ipc.StandbyException foo bar")
         mocked_client_cat = Mock(side_effect=e)
         ha_client = HAClient([Namenode("foo"), Namenode("bar")])
-        ha_client.cat = HAClient._ha_gen_method(mocked_client_cat)
-        cat_result_gen = ha_client.cat(ha_client, ['foobar'])
+        cat_result_gen = ha_client.cat(['foobar'])
         self.assertRaises(OutOfNNException, all, cat_result_gen)
-
-    def test_wrapped_methods(self):
-        public_methods = [(name, method) for name, method in inspect.getmembers(HAClient, inspect.ismethod) if not name.startswith("_")]
-        self.assertGreater(len(public_methods), 0)
-        wrapped_methods = [str(method) for name, method in public_methods if ".wrapped" in str(method)]
-        self.assertEqual(len(public_methods), len(wrapped_methods))
 
     def test_empty_namenodes_haclient(self):
         namenodes = ()
