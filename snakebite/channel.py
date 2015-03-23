@@ -195,6 +195,7 @@ class SocketRpcChannel(RpcChannel):
         self.version = version
         self.client_id = str(uuid.uuid4())
         self.effective_user = effective_user or pwd.getpwuid(os.getuid())[0]
+        self._transport = None
 
     def validate_request(self, request):
         '''Validate the client request against the protocol file.'''
@@ -216,9 +217,10 @@ class SocketRpcChannel(RpcChannel):
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.sock.settimeout(timeout)
 
-    def _get_connection_before(self):
+    def _init_connection(self, host=None, port=None):
         self._open_socket()
         self.sock.connect((host, port))
+        self.get_connection(host, port)
 
     def get_connection(self, host=None, port=None):
         '''Open a socket connection to a given host and port and writes the Hadoop header
@@ -266,7 +268,7 @@ class SocketRpcChannel(RpcChannel):
 
     def _enable_async(self, transport):
         self._transport = transport
-    
+
     def _disable_async(self):
         self.sock.setblocking(True)
         self._transport = None
@@ -451,12 +453,13 @@ class SocketRpcChannel(RpcChannel):
             self.validate_request(request)
 
             if not self.sock:
-                self.get_connection(self.host, self.port)
+                self._init_connection(self.host, self.port)
 
             self.send_rpc_message(method, request)
 
             if self._transport:
-                return 
+                log.debug("Async mode in channel is ON - won't wait for results")
+                return
             byte_stream = self.recv_rpc_message()
             return self.parse_response(byte_stream, response_class)
         except RequestError:  # Raise a request error, but don't close the socket

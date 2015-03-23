@@ -35,7 +35,7 @@ from snakebite.formatter import format_du
 from snakebite.config import HDFSConfig
 from snakebite.version import version
 from snakebite.namenode import Namenode
-
+import snakebite.protobuf.ClientNamenodeProtocol_pb2 as client_proto
 
 def print_error_exit(msg, fd=sys.stderr):
     print >> fd, "Error: %s" % msg
@@ -434,8 +434,8 @@ class CommandLineParser(object):
         else:
             use_trash = self.args.usetrash
         service = AsyncHARpcService(client_proto.ClientNamenodeProtocol_Stub,
-                               namenodes)
-        self.client = HAClient(self.namenodes, use_trash, service)
+                                    self.namenodes)
+        self.client = HAClient(self.namenodes, use_trash, service=service)
 
     def execute(self):
         if self.args.help:
