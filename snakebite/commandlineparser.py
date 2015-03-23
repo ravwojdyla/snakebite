@@ -21,6 +21,7 @@ import json
 from urlparse import urlparse
 
 from snakebite.client import HAClient
+from snakebite.service import AsyncHARpcService
 from snakebite.errors import FileNotFoundException
 from snakebite.errors import DirectoryException
 from snakebite.errors import FileException
@@ -432,7 +433,9 @@ class CommandLineParser(object):
             use_trash = self.args.usetrash and not self.args.skiptrash
         else:
             use_trash = self.args.usetrash
-        self.client = HAClient(self.namenodes, use_trash)
+        service = AsyncHARpcService(client_proto.ClientNamenodeProtocol_Stub,
+                               namenodes)
+        self.client = HAClient(self.namenodes, use_trash, service)
 
     def execute(self):
         if self.args.help:

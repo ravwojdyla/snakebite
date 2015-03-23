@@ -1353,7 +1353,7 @@ class HAClient(Client):
         in the ``version`` parameter to the Namenode class constructor.
     '''
 
-    def __init__(self, namenodes, use_trash=False, effective_user=None):
+    def __init__(self, namenodes, use_trash=False, effective_user=None, service=None):
         '''
         :param namenodes: Set of namenodes for HA setup
         :type namenodes: list
@@ -1361,6 +1361,8 @@ class HAClient(Client):
         :type use_trash: boolean
         :param effective_user: Effective user for the HDFS operations (default: None - current user)
         :type effective_user: string
+        :param service: RPC service to handle calls
+        :type service: RpcService
         '''
         self.use_trash = use_trash
         self.effective_user = effective_user
@@ -1369,9 +1371,14 @@ class HAClient(Client):
             raise OutOfNNException("List of namenodes is empty - couldn't create the client")
 
         self._init_trash(use_trash)
-        self.service = AsyncHARpcService(client_proto.ClientNamenodeProtocol_Stub,
+        if service is None:
+            self.service = HARpcService(client_proto.ClientNamenodeProtocol_Stub,
                                          namenodes,
                                          effective_user)
+        else:
+            if not isinstance(service, RpcService):
+                raise InvalidInputException("Service must be of RpcService class")
+            self.service = service
 
 
 class AutoConfigClient(HAClient):
@@ -1392,16 +1399,18 @@ class AutoConfigClient(HAClient):
         Different Hadoop distributions use different protocol versions. Snakebite defaults to 9, but this can be set by passing
         in the ``hadoop_version`` parameter to the constructor.
     '''
-    def __init__(self, hadoop_version=Namenode.DEFAULT_VERSION, effective_user=None):
+    def __init__(self, hadoop_version=Namenode.DEFAULT_VERSION, effective_user=None, service=None):
         '''
         :param hadoop_version: What hadoop protocol version should be used (default: 9)
         :type hadoop_version: int
         :param effective_user: Effective user for the HDFS operations (default: None - current user)
         :type effective_user: string
+        :param service: RPC service to handle calls
+        :type service: RpcService
         '''
 
         configs = HDFSConfig.get_external_config()
         nns = [Namenode(c['namenode'], c['port'], hadoop_version) for c in configs]
         if not nns:
             raise OutOfNNException("Tried and failed to find namenodes - couldn't created the client!")
-        super(AutoConfigClient, self).__init__(nns, HDFSConfig.use_trash, effective_user)
+        super(AutoConfigClient, self).__init__(nns, HDFSConfig.use_trash, effective_user, service)
