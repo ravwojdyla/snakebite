@@ -74,17 +74,21 @@ class HARpcService(RpcService):
         self.active_service = None
         self._decorate_with_service_methods(service_stub_class)
 
-    def _handle_request_error(self, service, exception):
+    def _handle_request_error(self, service, exception, else_raise=True):
         log.debug("Request failed with %s" % exception)
         if exception.args[0].startswith("org.apache.hadoop.ipc.StandbyException"):
             service.controller.reason = "standby"
             pass
+        elif exception.args[0].startswith("org.apache.hadoop.ipc.RpcNoSuchProtocolException"):
+            service.controller.reason = "wrong protocol <verify port>"
+            pass
         else:
             # There's a valid NN in active state, but there's still request error - raise
             service.controller.reason = "namenode error"
-            raise
+            if else_raise:
+                raise
 
-    def _handle_socket_error(self, service, exception):
+    def _handle_socket_error(self, service, exception, else_raise=True):
         log.debug("Request failed with %s" % exception)
         if exception.errno in (errno.ECONNREFUSED, errno.EHOSTUNREACH):
             # if NN is down or machine is not available, pass it:
@@ -95,7 +99,8 @@ class HARpcService(RpcService):
             service.controller.reason = "request timeout"
             pass
         else:
-            raise
+            if else_raise:
+                raise
 
     def _try_call_service(self, service, method, request):
         try:
@@ -145,23 +150,25 @@ class HARpcService(RpcService):
             msg = "Request tried and failed for all %d namenodes: " % len(self._namenodes)
             for service in self.services:
                 msg += "\n\t* %s:%d (reason: %s)" % (service.host, service.port, service.controller.reason)
-            msg += "\nLook into debug messages - add -D flag!"
+            msg += "\nLook into debug messages - in command line add -D flag!"
             raise OutOfNNException(msg)
         else:
             return result
 
 
 class _ConnectNNProtocol(trollius.Protocol):
-    def __init__(self, ha_service, service, loop, future_active):
+    def __init__(self, ha_service, service, loop, future_active, initial=False):
         self.loop = loop
         self.service = service
         self.ha_service = ha_service
         self.future_active = future_active
+        self.initial = initial
 
     def connection_made(self, transport):
         log.debug("Connection to %s made - will send ServerDefaults request!" % self.service)
         self.service.channel._enable_async(transport)
-        self.service.channel.get_connection()
+        if self.initial:
+            self.service.channel.get_connection()
         request = client_proto.GetServerDefaultsRequestProto()
         self.service.service.getServerDefaults(self.service.controller, request)
 
@@ -174,9 +181,13 @@ class _ConnectNNProtocol(trollius.Protocol):
             log.debug("Found valid respond from %s - will mark as active service!" % self.service)
             self.future_active.set_result(self.service)
         except RequestError as e:
-            self.ha_service._handle_request_error(self.service, e)
+            self.ha_service._handle_request_error(self.service, e, False)
+            self.future_active.set_exception(e)
         except socket.error as e:
-            self.ha_service._handle_socket_error(self.service, e)
+            self.ha_service._handle_socket_error(self.service, e, False)
+            self.future_active.set_exception(e)
+        except Exception as e:
+            self.future_active.set_exception(e)
 
     def connection_lost(self, exc):
         log.debug("Connection to %s closed/lost!" % self.service)
@@ -198,6 +209,7 @@ class AsyncHARpcService(HARpcService):
             raise OSError('getaddrinfo() returned empty list')
 
         exceptions = []
+        initial_setup = True
         for family, type, proto, cname, address in infos:
             sock = None
             try:
@@ -205,13 +217,19 @@ class AsyncHARpcService(HARpcService):
                 sock = service.channel.get_socket()
                 sock.setblocking(False)
                 yield From(self._async_loop.sock_connect(sock, address))
-            except OSError as exc:
+            except socket.error as ex:
+                if ex.errno in (errno.EISCONN,):
+                    initial_setup = False
+                    log.debug("Socket to %s already connected - reuse" % str(sock.getpeername()))
+                    break
+            except OSError as ex:
                 if sock is not None:
-                    sock.close()
-                exceptions.append(exc)
+                    service.channel.close_socket()
+                exceptions.append(ex)
             except:
+                log.debug("Exception in socket setup process - will close socket if needed and escalate!")
                 if sock is not None:
-                    sock.close()
+                    service.channel.close_socket()
                 raise
             else:
                 break
@@ -227,15 +245,37 @@ class AsyncHARpcService(HARpcService):
                 # the various error messages.
                 raise OSError('Multiple exceptions: {}'.format(
                     ', '.join(str(exc) for exc in exceptions)))
-        coro = self._async_loop.create_connection(lambda: _ConnectNNProtocol(self, service, self._async_loop, future_active),
+        coro = self._async_loop.create_connection(lambda: _ConnectNNProtocol(self, service, self._async_loop, future_active, initial_setup),
                                                   sock=service.channel.get_socket())
-        protocol, transport = yield From(coro)
-        raise Return((protocol, transport))
+        yield From(coro)
 
     @trollius.coroutine
     def _find_active_service(self, future_active):
-        future_connections = tuple(self._open_future_connection_to(s, future_active) for s in self.services)
-        done, panding = yield From(trollius.wait(future_connections))
+        service_to_future = tuple((s, trollius.Future()) for s in self.services)
+        future_connections = tuple(self._open_future_connection_to(s, f) for s,f in service_to_future)
+        done, pending = yield From(trollius.wait(future_connections))
+        future_actives = tuple(s_t_f[1] for s_t_f in service_to_future)
+
+        while True:
+            done, pending = yield From(trollius.wait(future_actives))
+            for d in done:
+                if d.exception() == None:
+                    done.remove(d)
+                    all(tuple((i.cancel(), i.exception()) for i in done))
+                    all(tuple((i.cancel() for i in pending)))
+
+                    future_active.set_result(d.result())
+                    raise Return(None)
+
+            if len(pending) == 0:
+                all(tuple(i.exception() for i in done))
+
+                msg = "Request tried and failed for all %d namenodes: " % len(self._namenodes)
+                for service in self.services:
+                    msg += "\n\t* %s:%d (reason: %s)" % (service.host, service.port, service.controller.reason)
+                msg += "\nLook into debug messages - in command line add -D flag!"
+                future_active.set_exception(OutOfNNException(msg))
+                raise Return(None)
 
     def call(self, method, request):
         while(True):
@@ -245,6 +285,7 @@ class AsyncHARpcService(HARpcService):
             future_active_service = trollius.Future()
             trollius.async(self._find_active_service(future_active_service))
             self._async_loop.run_until_complete(future_active_service)
+
             self.active_service = future_active_service.result()
 
 
