@@ -16,7 +16,7 @@
 import snakebite.protobuf.ClientNamenodeProtocol_pb2 as client_proto
 import snakebite.glob as glob
 from snakebite.errors import RequestError
-from snakebite.service import RpcService, HARpcService
+from snakebite.service import RpcService, HARpcService, AsyncHARpcService
 from snakebite.errors import FileAlreadyExistsException
 from snakebite.errors import FileNotFoundException
 from snakebite.errors import DirectoryException
@@ -1369,7 +1369,7 @@ class HAClient(Client):
             raise OutOfNNException("List of namenodes is empty - couldn't create the client")
 
         self._init_trash(use_trash)
-        self.service = HARpcService(client_proto.ClientNamenodeProtocol_Stub,
+        self.service = AsyncHARpcService(client_proto.ClientNamenodeProtocol_Stub,
                                          namenodes,
                                          effective_user)
 

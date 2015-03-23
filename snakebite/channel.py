@@ -99,6 +99,29 @@ def get_delimited_message_bytes(byte_stream, nr=4):
     total_len = length + pos
     return (total_len, message_bytes)
 
+class RpcNonBufferedReader(object):
+    def __init__(self, buffer):
+        self.reset()
+        self.buffer = buffer
+
+    def read(self, n):
+        end_pos = self.pos + n
+        ret = self.buffer[self.pos + 1:end_pos + 1]
+        self.pos = end_pos
+        return ret
+
+    def rewind(self, places):
+        '''Rewinds the current buffer to a position. Needed for reading varints,
+        because we might read bytes that belong to the stream after the varint.
+        '''
+        log.debug("Rewinding pos %d with %d places" % (self.pos, places))
+        self.pos -= places
+        log.debug("Reset buffer to pos %d" % self.pos)
+
+    def reset(self):
+        self.buffer = ""
+        self.pos = -1  # position of last byte read
+
 
 class RpcBufferedReader(object):
     '''Class that wraps a socket and provides some utility methods for reading
@@ -180,7 +203,24 @@ class SocketRpcChannel(RpcChannel):
         if not request.IsInitialized():
             raise Exception("Client request (%s) is missing mandatory fields" % type(request))
 
-    def get_connection(self, host, port):
+    def get_socket(self):
+        return self.sock
+
+    def _open_socket(self,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                    timeout=10):
+        # Open socket
+        if self.sock is None:
+            self.sock = socket.socket(family, type)
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock.settimeout(timeout)
+
+    def _get_connection_before(self):
+        self._open_socket()
+        self.sock.connect((host, port))
+
+    def get_connection(self, host=None, port=None):
         '''Open a socket connection to a given host and port and writes the Hadoop header
         The Hadoop RPC protocol looks like this when creating a connection:
 
@@ -203,12 +243,7 @@ class SocketRpcChannel(RpcChannel):
         '''
 
         log.debug("############## CONNECTING ##############")
-        # Open socket
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.sock.settimeout(10)
-        # Connect socket to server - defined by host and port arguments
-        self.sock.connect((host, port))
+       # Connect socket to server - defined by host and port arguments
 
         # Send RPC headers
         self.write(self.RPC_HEADER)                             # header
@@ -228,11 +263,21 @@ class SocketRpcChannel(RpcChannel):
 
         self.write_delimited(rpc_header)
         self.write_delimited(context)
+
+    def _enable_async(self, transport):
+        self._transport = transport
     
+    def _disable_async(self):
+        self.sock.setblocking(True)
+        self._transport = None
+
     def write(self, data):
         if log.getEffectiveLevel() == logging.DEBUG:
             log.debug("Sending: %s", format_bytes(data))
-        self.sock.send(data)
+        if self._transport:
+            self._transport.write(data)
+        else:
+            self.sock.send(data)
 
     def write_delimited(self, data):
         self.write(encoder._VarintBytes(len(data)))
@@ -410,6 +455,8 @@ class SocketRpcChannel(RpcChannel):
 
             self.send_rpc_message(method, request)
 
+            if self._transport:
+                return 
             byte_stream = self.recv_rpc_message()
             return self.parse_response(byte_stream, response_class)
         except RequestError:  # Raise a request error, but don't close the socket
